@@ -1,67 +1,97 @@
-import requests
+from selenium import webdriver
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import time
 import pandas as pd
 
-# 인스타그램 로그인 없이 크롤링을 위한 기본 설정
-hashtags = ["쇼핑", "할인"]  # 사용할 해시태그 목록
-followers_threshold = 100000  # 팔로워 수 필터
-unique_accounts = set()  # 중복 계정 필터링
-results = []  # 결과 저장
+# ChromeDriver 설정
 
-# 헤더 설정 (인스타그램 요청을 일반 브라우저로 보이게 하여 차단을 우회하기 위함)
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
+service = Service(ChromeDriverManager().install())
+options = webdriver.ChromeOptions()
+options.add_argument('--start-maximized')
+driver = webdriver.Chrome(service=service, options=options)
+# Instagram 로그인
+def login_instagram(username, password):
+    driver.get("https://www.instagram.com/accounts/login/")
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.NAME, "username")))
+    driver.find_element(By.NAME, "username").send_keys(username)
+    driver.find_element(By.NAME, "password").send_keys(password)
+    driver.find_element(By.NAME, "password").send_keys(Keys.RETURN)
+    time.sleep(5)
 
-# 크롤링 시작
-for tag in hashtags:
-    print(f"검색 중: #{tag}")
-    url = f"https://www.instagram.com/explore/tags/{tag}/"
-    
-    try:
-        # 웹 페이지 요청
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            # JSON 데이터를 가져오기 위해 스크립트에서 데이터 추출
-            shared_data = soup.find("script", {"type": "text/javascript"})
-            if shared_data:
-                json_data = shared_data.string.split("window._sharedData = ")[1].split(";</script>")[0]
-                
-                # JSON 파싱
-                import json
-                data = json.loads(json_data)
-                
-                # 게시물 추출
-                for post in data['entry_data']['TagPage'][0]['graphql']['hashtag']['edge_hashtag_to_media']['edges']:
-                    username = post['node']['owner']['username']
-                    followers = post['node']['owner']['edge_owner_to_timeline_media']['count']
-                    
-                    # 중복 계정과 팔로워 수 필터링
-                    if username not in unique_accounts and followers >= followers_threshold:
-                        results.append({
-                            "username": username,
-                            "followers": followers,
-                            "url": f"https://www.instagram.com/{username}/"
-                        })
-                        unique_accounts.add(username)
-                        print(f"추가됨: {username} - {followers}")
-                    
-                    # 100개 이상 수집 시 종료
-                    if len(results) >= 100:
-                        break
-                if len(results) >= 100:
-                    break
-            time.sleep(3)  # 대기 시간 추가
-    except Exception as e:
-        print(f"오류 발생: {e}")
-        continue
+# 특정 태그 크롤링
+def crawl_hashtag_pilates(hashtag, max_posts=10):
+    driver.get(f"https://www.instagram.com/explore/tags/{hashtag}/")
+    time.sleep(5)
 
-# 결과 저장
-df = pd.DataFrame(results)
-df.to_csv('insta_results.csv', index=False)
-print("크롤링 완료! 결과가 insta_results.csv 파일에 저장되었습니다.")
+    # 게시물 링크 수집
+    links = set()
+    while len(links) < max_posts:
+        posts = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/')]")
+        for post in posts:
+            links.add(post.get_attribute("href"))
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.END)
+        time.sleep(5)
+
+    # 게시물 및 사용자 정보 수집
+    filtered_posts = []
+    for link in list(links)[:max_posts]:
+        driver.get(link)
+        time.sleep(3)
+
+        # BeautifulSoup로 HTML 파싱
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # 게시물 텍스트
+        try:
+            content = soup.find('div', {'class': '_a9zs'}).text
+        except AttributeError:
+            content = "No text available"
+
+        # 사용자 정보
+        try:
+            user_tag = soup.find('a', {'class': '_a6hd'}).text
+            profile_url = "https://www.instagram.com" + soup.find('a', {'class': '_a6hd'})['href']
+        except AttributeError:
+            user_tag = "Unknown"
+            profile_url = "Unknown"
+
+        # 사용자 팔로워 수
+        followers = 0
+        try:
+            driver.get(profile_url)
+            time.sleep(3)
+            profile_soup = BeautifulSoup(driver.page_source, 'html.parser')
+            followers_element = profile_soup.find('span', {'class': '_ac2a'})
+            if followers_element:
+                followers_text = followers_element.text.replace(',', '').replace('k', '000').replace('m', '000000')
+                followers = int(followers_text)
+        except Exception:
+            followers = 0
+
+        # 조건에 맞는 데이터 필터링
+        if followers >= 100000:  # 10만 팔로워 이상
+            filtered_posts.append({
+                "post_link": link,
+                "content": content,
+                "user": user_tag,
+                "profile_url": profile_url,
+                "followers": followers
+            })
+
+    return pd.DataFrame(filtered_posts)
+
+# 실행
+try:
+    login_instagram("kyunghoon416", "1q2w3e4r!@")  # 인스타그램 계정 입력
+    pilates_data = crawl_hashtag_pilates("필라테스", max_posts=50)  # 최대 50개의 게시물 크롤링
+    pilates_data.to_csv("pilates_filtered_users.csv", index=False)
+    print("Filtered data saved to pilates_filtered_users.csv")
+finally:
+    driver.quit()
 
